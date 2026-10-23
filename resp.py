@@ -1,5 +1,10 @@
 """RESP (REdis Serialization Protocol): parsing requests and encoding replies."""
 
+# Limits, so one broken or hostile client can't make the server eat all memory.
+MAX_BULK_LEN = 512 * 1024 * 1024   # one argument, same limit as real Redis
+MAX_ARGS = 1024 * 1024             # arguments in one command
+MAX_LINE_LEN = 64 * 1024           # a header line ("*3", "$5", or an inline command)
+
 
 class ProtocolError(Exception):
     """Raised when the client sends something that is not valid RESP."""
@@ -27,16 +32,22 @@ def parse_command(buf: bytearray):
     if buf[0:1] != b"*":
         end = buf.find(b"\r\n")
         if end == -1:
+            if len(buf) > MAX_LINE_LEN:
+                raise ProtocolError("too big inline request")
             return None
         return bytes(buf[:end]).split(), end + 2
 
     # Array of bulk strings: *<count>\r\n  then  $<len>\r\n<data>\r\n  per item.
     pos = buf.find(b"\r\n")
     if pos == -1:
+        if len(buf) > MAX_LINE_LEN:
+            raise ProtocolError("too big mbulk count string")
         return None
     try:
         count = int(buf[1:pos])
     except ValueError:
+        raise ProtocolError("invalid multibulk length")
+    if count > MAX_ARGS:
         raise ProtocolError("invalid multibulk length")
     pos += 2
 
@@ -48,16 +59,20 @@ def parse_command(buf: bytearray):
             raise ProtocolError("expected '$', got %r" % bytes(buf[pos:pos + 1]))
         end = buf.find(b"\r\n", pos)
         if end == -1:
+            if len(buf) - pos > MAX_LINE_LEN:
+                raise ProtocolError("too big bulk count string")
             return None
         try:
             length = int(buf[pos + 1:end])
         except ValueError:
             raise ProtocolError("invalid bulk length")
-        if length < 0:
+        if length < 0 or length > MAX_BULK_LEN:
             raise ProtocolError("invalid bulk length")
         start = end + 2
         if len(buf) < start + length + 2:
             return None  # the data itself hasn't fully arrived yet
+        if buf[start + length:start + length + 2] != b"\r\n":
+            raise ProtocolError("bulk string not terminated by CRLF")
         args.append(bytes(buf[start:start + length]))
         pos = start + length + 2
 
