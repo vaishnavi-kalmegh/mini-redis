@@ -14,12 +14,19 @@ from store import Store
 
 store = Store()
 
+# If a client has sent this many bytes of one unfinished command, give up on it.
+# (Real Redis uses 1 GB too.) Set by --max-query-buffer; tests use a tiny value.
+max_query_buffer = 1024 ** 3
+
 
 async def handle_client(reader, writer):
+    """One of these runs per connected client. Because they are all coroutines
+    on a single event loop, a client that is slow or idle only pauses its own
+    coroutine, and commands from different clients never run at the same time."""
     buf = bytearray()
     try:
         while True:
-            data = await reader.read(4096)
+            data = await reader.read(65536)
             if not data:
                 break  # client disconnected
             buf.extend(data)
@@ -43,11 +50,22 @@ async def handle_client(reader, writer):
                         traceback.print_exc(file=sys.stderr)
                         writer.write(resp.error("ERR internal error"))
 
+            if len(buf) > max_query_buffer:
+                writer.write(resp.error("ERR Protocol error: query buffer limit exceeded"))
+                await writer.drain()
+                return
+
+            # drain() waits if this client isn't reading its replies fast enough.
+            # Only this client's coroutine waits; everyone else keeps being served.
             await writer.drain()
     except ConnectionError:
         pass
     finally:
         writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass  # the client is already gone, nothing left to clean up
 
 
 async def sweeper():
@@ -72,7 +90,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=6380)
+    p.add_argument("--max-query-buffer", type=int, default=max_query_buffer,
+                   help="bytes of one unfinished command before the client is dropped")
     a = p.parse_args()
+    max_query_buffer = a.max_query_buffer
     try:
         asyncio.run(main(a.host, a.port))
     except KeyboardInterrupt:

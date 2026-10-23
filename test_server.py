@@ -8,16 +8,9 @@ import sys
 import time
 import unittest
 
+from testutil import cmd
+
 PORT = 6391
-
-
-def cmd(*parts):
-    """Encode a command in RESP, e.g. cmd('SET','a','1')."""
-    out = b"*%d\r\n" % len(parts)
-    for p in parts:
-        p = p.encode() if isinstance(p, str) else p
-        out += b"$%d\r\n%s\r\n" % (len(p), p)
-    return out
 
 
 class ServerTest(unittest.TestCase):
