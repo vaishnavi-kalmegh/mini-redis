@@ -13,7 +13,7 @@ redis-cli -p 6380 PING        # -> PONG
 ## Run the tests
 
 ```
-python -m unittest -v
+python -m unittest -v        # all tests, takes a few seconds
 ```
 
 ## Commands
@@ -64,11 +64,41 @@ Edge case decisions, each covered by a test:
 
 Time-based tests use a fake clock, so they are exact and never sleep.
 
+### Many clients at once
+
+Every connected client gets its own coroutine on one `asyncio` event loop, the same
+idea as Redis's single loop serving everyone in turn. This gives some useful
+properties, each covered by a test in `test_concurrency.py`:
+
+- **Commands never overlap.** Only one command runs at a time, so `INCR` from 50
+  clients at once returns exactly 1..N with no lost or repeated numbers, and no
+  locks are needed.
+- **A slow client only slows itself.** A client that never reads its replies makes
+  only its own coroutine wait (`drain()`); other clients are still answered.
+- **Broken clients are survivable.** Clients that disconnect halfway through a
+  command, send garbage, or promise a huge value and never finish are cleaned up
+  without affecting anyone else. A client whose unfinished command grows past
+  `--max-query-buffer` (default 1 GB) is dropped.
+- Also tested: 150 idle connections, a 5 MB value, and 10,000 pipelined commands in
+  one write.
+
+The parser has its own tests (`test_resp.py`), including one that feeds every
+possible partial prefix of a command and checks it reports "not complete yet".
+
+I also pointed the real `redis-benchmark` tool at the server with 50 and 200
+clients (including pipelining) as a sanity check. It completed without errors.
+Proper speed measurements against real Redis come in Stage 5.
+
+**Trade-off:** because one thread runs every command, one slow command delays all
+clients. Real Redis has the same property, which is why its docs warn against
+slow commands on big data.
+
 ## Not built yet
 
 - Saving to disk (a restart wipes all data)
 - Many commands real Redis has (this is deliberately about 15)
 - `SET` options other than `EX` and `PX`
+- A limit on the number of connections (`maxclients`)
 - The sweep builds a list of all keys with deadlines each time, which is fine here
   but would be too slow for millions of keys
 - Comparison tests and benchmarks against real Redis
@@ -77,6 +107,6 @@ Time-based tests use a fake clock, so they are exact and never sleep.
 
 1. Basics (done)
 2. Counters, expiry, lists, hashes (done)
-3. Many clients at once (already on `asyncio`; verify under load)
+3. Many clients at once (done)
 4. Persistence with an append-only log
 5. Compare with real Redis in Docker, benchmark, write up results
