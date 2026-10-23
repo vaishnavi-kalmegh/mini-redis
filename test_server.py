@@ -91,6 +91,21 @@ class ServerTest(unittest.TestCase):
     def test_case_insensitive_command(self):
         self.assertEqual(self.ask("ping", expect_len=7), b"+PONG\r\n")
 
+    # ---- expiry over the wire (real time, so keep the waits short) ----
+
+    def test_set_px_expires_for_real(self):
+        self.assertEqual(self.ask("SET", "short", "v", "PX", "100", expect_len=5), b"+OK\r\n")
+        self.assertEqual(self.ask("GET", "short", expect_len=7), b"$1\r\nv\r\n")
+        time.sleep(0.2)
+        self.assertEqual(self.ask("GET", "short", expect_len=5), b"$-1\r\n")
+
+    def test_ttl_and_expire_replies(self):
+        self.ask("SET", "t", "v", expect_len=5)
+        self.assertEqual(self.ask("TTL", "t", expect_len=5), b":-1\r\n")
+        self.assertEqual(self.ask("EXPIRE", "t", "100", expect_len=4), b":1\r\n")
+        self.assertEqual(self.ask("TTL", "t", expect_len=6), b":100\r\n")
+        self.assertEqual(self.ask("TTL", "missing", expect_len=5), b":-2\r\n")
+
     # ---- errors ----
 
     def test_unknown_command(self):
