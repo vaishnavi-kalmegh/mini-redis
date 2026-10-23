@@ -125,6 +125,52 @@ class ExpiryTest(CommandTest):
         self.assertEqual(self.run_cmd("EXISTS", "k"), b":0\r\n")  # failed SETs stored nothing
 
 
+class CounterTest(CommandTest):
+    def test_incr_creates_key_at_zero(self):
+        self.assertEqual(self.run_cmd("INCR", "n"), b":1\r\n")
+        self.assertEqual(self.run_cmd("INCR", "n"), b":2\r\n")
+        self.assertEqual(self.run_cmd("GET", "n"), b"$1\r\n2\r\n")
+
+    def test_decr_goes_negative(self):
+        self.assertEqual(self.run_cmd("DECR", "n"), b":-1\r\n")
+        self.assertEqual(self.run_cmd("DECR", "n"), b":-2\r\n")
+
+    def test_incr_on_existing_number_string(self):
+        self.run_cmd("SET", "n", "41")
+        self.assertEqual(self.run_cmd("INCR", "n"), b":42\r\n")
+
+    def test_incr_on_non_number_is_an_error_and_leaves_value_alone(self):
+        self.run_cmd("SET", "n", "hello")
+        self.assertTrue(self.run_cmd("INCR", "n").startswith(b"-ERR value is not an integer"))
+        self.assertEqual(self.run_cmd("GET", "n"), b"$5\r\nhello\r\n")
+
+    def test_incr_rejects_values_python_would_accept(self):
+        for bad in (" 5", "5 ", "1_000", "+5", "007", "1.5", ""):
+            self.run_cmd("SET", "n", bad)
+            self.assertTrue(self.run_cmd("INCR", "n").startswith(b"-ERR value is not an integer"), bad)
+
+    def test_incr_overflow(self):
+        self.run_cmd("SET", "n", str(2 ** 63 - 1))
+        self.assertTrue(self.run_cmd("INCR", "n").startswith(b"-ERR increment or decrement would overflow"))
+        self.run_cmd("SET", "m", str(-(2 ** 63)))
+        self.assertTrue(self.run_cmd("DECR", "m").startswith(b"-ERR increment or decrement would overflow"))
+
+    def test_incr_keeps_ttl(self):
+        self.run_cmd("SET", "n", "1", "EX", "10")
+        self.run_cmd("INCR", "n")
+        self.assertEqual(self.run_cmd("TTL", "n"), b":10\r\n")
+
+    def test_incr_on_expired_key_starts_over(self):
+        self.run_cmd("SET", "n", "50", "EX", "1")
+        self.clock.advance(1)
+        self.assertEqual(self.run_cmd("INCR", "n"), b":1\r\n")
+        self.assertEqual(self.run_cmd("TTL", "n"), b":-1\r\n")
+
+    def test_wrong_arg_count(self):
+        self.assertTrue(self.run_cmd("INCR").startswith(b"-ERR wrong number of arguments"))
+        self.assertTrue(self.run_cmd("DECR", "a", "b").startswith(b"-ERR wrong number of arguments"))
+
+
 class SweepTest(CommandTest):
     def test_sweep_removes_expired_keys_only(self):
         self.run_cmd("SET", "short1", "v", "EX", "1")
