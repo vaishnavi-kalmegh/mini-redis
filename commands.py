@@ -6,7 +6,9 @@ from itertools import islice
 
 import resp
 
-INT_RE = re.compile(rb"-?(0|[1-9][0-9]*)")
+# Redis's rule: "0", or an optional minus sign then a number with no leading zero.
+# That makes "-0", "007", "+5" and " 5" all invalid.
+INT_RE = re.compile(rb"0|-?[1-9][0-9]*")
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 
 WRONGTYPE = resp.error("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -28,6 +30,20 @@ def wrong_args(name):
     return resp.error("ERR wrong number of arguments for '%s' command" % name)
 
 
+def deadline_ms(store, amount, unit_ms):
+    """now + amount * unit, or None if the result doesn't fit in 64 bits.
+    Real Redis rejects those with 'invalid expire time'. The lower bound uses
+    C-style rounding toward zero so the boundary matches exactly."""
+    if amount > INT64_MAX // unit_ms or amount < -(2 ** 63 // unit_ms):
+        return None
+    deadline = store.now_ms() + amount * unit_ms
+    return deadline if deadline <= INT64_MAX else None
+
+
+def invalid_expire(command):
+    return resp.error("ERR invalid expire time in '%s' command" % command)
+
+
 # ---- connection / strings ----
 
 def cmd_ping(store, args):
@@ -44,23 +60,24 @@ def cmd_set(store, args):
         return wrong_args("set")
     key, value = args[0], args[1]
 
-    deadline_ms = None
+    deadline = None
     i = 2
     while i < len(args):
         option = args[i].upper()
-        if option in (b"EX", b"PX") and deadline_ms is None and i + 1 < len(args):
+        if option in (b"EX", b"PX") and deadline is None and i + 1 < len(args):
             amount = parse_int(args[i + 1])
             if amount is None:
                 return NOT_INT
             if amount <= 0:
-                return resp.error("ERR invalid expire time in 'set' command")
-            unit = 1000 if option == b"EX" else 1
-            deadline_ms = store.now_ms() + amount * unit
+                return invalid_expire("set")
+            deadline = deadline_ms(store, amount, 1000 if option == b"EX" else 1)
+            if deadline is None:
+                return invalid_expire("set")
             i += 2
         else:
             return SYNTAX
 
-    store.set(key, value, deadline_ms)
+    store.set(key, value, deadline)
     return resp.simple_string("OK")
 
 
@@ -95,12 +112,15 @@ def cmd_expire(store, args):
     seconds = parse_int(args[1])
     if seconds is None:
         return NOT_INT
+    deadline = deadline_ms(store, seconds, 1000)
+    if deadline is None:  # checked even if the key is missing, like real Redis
+        return invalid_expire("expire")
     if not store.exists(args[0]):
         return resp.integer(0)
     if seconds <= 0:
         store.delete(args[0])  # a deadline in the past deletes the key
         return resp.integer(1)
-    store.set_expiry(args[0], store.now_ms() + seconds * 1000)
+    store.set_expiry(args[0], deadline)
     return resp.integer(1)
 
 
@@ -262,5 +282,16 @@ COMMANDS = {
 def execute(store, args):
     handler = COMMANDS.get(args[0].upper())
     if handler is None:
-        return resp.error("ERR unknown command '%s'" % args[0].decode(errors="replace"))
+        return unknown_command(args)
     return handler(store, args[1:])
+
+
+def unknown_command(args):
+    """Same wording as real Redis 7: the name, then the start of the arguments
+    (cut off at about 128 characters so a huge argument can't fill the reply)."""
+    shown = b""
+    for arg in args[1:]:
+        if len(shown) >= 128:
+            break
+        shown += b"'" + arg[:128 - len(shown)] + b"' "
+    return resp.error(b"ERR unknown command '" + args[0][:128] + b"', with args beginning with: " + shown)

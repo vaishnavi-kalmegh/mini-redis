@@ -115,6 +115,19 @@ class ExpiryTest(CommandTest):
         self.run_cmd("DEL", "k")
         self.assertNotIn(b"k", self.store.expires)
 
+    def test_expiry_that_does_not_fit_in_64_bits_is_rejected(self):
+        too_big = "invalid expire time in '%s' command"
+        self.run_cmd("SET", "k", "v")
+        for huge in ("9223372036854775807", "9223372036854776", "-9223372036854775808"):
+            self.assertTrue(self.run_cmd("EXPIRE", "k", huge).startswith(b"-ERR " + (too_big % "expire").encode()), huge)
+            self.assertTrue(self.run_cmd("EXPIRE", "missing", huge).startswith(b"-ERR " + (too_big % "expire").encode()), huge)
+        for unit in ("EX", "PX"):
+            self.assertTrue(self.run_cmd("SET", "k2", "v", unit, "9223372036854775807")
+                            .startswith(b"-ERR " + (too_big % "set").encode()))
+        self.assertEqual(self.run_cmd("EXISTS", "k", "k2"), b":1\r\n")  # k untouched, k2 never created
+        self.assertEqual(self.run_cmd("TTL", "k"), b":-1\r\n")
+        self.assertEqual(self.run_cmd("EXPIRE", "k", "4611686018427387"), b":1\r\n")  # big but legal
+
     def test_bad_set_options(self):
         self.assertTrue(self.run_cmd("SET", "k", "v", "EX", "0").startswith(b"-ERR invalid expire time"))
         self.assertTrue(self.run_cmd("SET", "k", "v", "EX", "-1").startswith(b"-ERR invalid expire time"))
@@ -145,7 +158,7 @@ class CounterTest(CommandTest):
         self.assertEqual(self.run_cmd("GET", "n"), b"$5\r\nhello\r\n")
 
     def test_incr_rejects_values_python_would_accept(self):
-        for bad in (" 5", "5 ", "1_000", "+5", "007", "1.5", ""):
+        for bad in (" 5", "5 ", "1_000", "+5", "007", "-0", "-007", "1.5", ""):
             self.run_cmd("SET", "n", bad)
             self.assertTrue(self.run_cmd("INCR", "n").startswith(b"-ERR value is not an integer"), bad)
 
@@ -308,6 +321,25 @@ class WrongTypeTest(CommandTest):
     def test_del_and_exists_work_on_any_type(self):
         self.assertEqual(self.run_cmd("EXISTS", "str", "list", "hash"), b":3\r\n")
         self.assertEqual(self.run_cmd("DEL", "str", "list", "hash"), b":3\r\n")
+
+
+class UnknownCommandTest(CommandTest):
+    def test_message_matches_real_redis(self):
+        self.assertEqual(self.run_cmd("FLY"), b"-ERR unknown command 'FLY', with args beginning with: \r\n")
+        self.assertEqual(self.run_cmd("FLY", "a", "b"),
+                         b"-ERR unknown command 'FLY', with args beginning with: 'a' 'b' \r\n")
+
+    def test_line_breaks_in_the_name_cannot_break_the_reply(self):
+        reply = self.run_cmd("A\r\nB", "x\ny")
+        self.assertEqual(reply.count(b"\r\n"), 1)  # still exactly one line
+        self.assertTrue(reply.endswith(b"\r\n"))
+
+    def test_huge_arguments_are_cut_off(self):
+        reply = self.run_cmd("FLY", "x" * 5000)
+        self.assertLess(len(reply), 300)
+
+    def test_raw_bytes_are_echoed_unchanged(self):
+        self.assertIn(b"\xff\xfe", commands.execute(self.store, [b"FLY", b"\xff\xfe"]))
 
 
 class SweepTest(CommandTest):

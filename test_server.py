@@ -3,38 +3,23 @@
 Run:  python -m unittest -v
 """
 import socket
-import subprocess
-import sys
 import time
 import unittest
 
-from testutil import cmd
-
-PORT = 6391
+from testutil import cmd, start_server, stop_server
 
 
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.proc = subprocess.Popen(
-            [sys.executable, "server.py", "--port", str(PORT)],
-            stdout=subprocess.DEVNULL,
-        )
-        for _ in range(50):
-            try:
-                socket.create_connection(("127.0.0.1", PORT), timeout=0.2).close()
-                return
-            except OSError:
-                time.sleep(0.1)
-        raise RuntimeError("server did not start")
+        cls.proc, cls.port = start_server()  # a free port, so tests never clash with anything
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.wait()
+        stop_server(cls.proc)
 
     def setUp(self):
-        self.sock = socket.create_connection(("127.0.0.1", PORT), timeout=2)
+        self.sock = socket.create_connection(("127.0.0.1", self.port), timeout=2)
 
     def tearDown(self):
         self.sock.close()

@@ -125,6 +125,8 @@ class EncodingTest(unittest.TestCase):
     def test_replies(self):
         self.assertEqual(resp.simple_string("OK"), b"+OK\r\n")
         self.assertEqual(resp.error("ERR x"), b"-ERR x\r\n")
+        self.assertEqual(resp.error(b"ERR \xff"), b"-ERR \xff\r\n")
+        self.assertEqual(resp.error("ERR a\r\nb\nc\rd"), b"-ERR a  b c d\r\n")  # one line only
         self.assertEqual(resp.integer(-5), b":-5\r\n")
         self.assertEqual(resp.bulk_string(b"hi"), b"$2\r\nhi\r\n")
         self.assertEqual(resp.bulk_string(b""), b"$0\r\n\r\n")

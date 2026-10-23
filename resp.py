@@ -85,8 +85,13 @@ def simple_string(s: str) -> bytes:
     return b"+" + s.encode() + b"\r\n"
 
 
-def error(msg: str) -> bytes:
-    return b"-" + msg.encode() + b"\r\n"
+def error(msg) -> bytes:
+    """msg is str or bytes. Line breaks are replaced with spaces: an error is a
+    single line, and a CRLF inside it (say, from a client-chosen command name)
+    would end the reply early and corrupt everything after it."""
+    if isinstance(msg, str):
+        msg = msg.encode()
+    return b"-" + msg.replace(b"\r", b" ").replace(b"\n", b" ") + b"\r\n"
 
 
 def integer(n: int) -> bytes:

@@ -73,7 +73,7 @@ async def read_reply(reader):
     if kind == b"+":
         return rest
     if kind == b"-":
-        return RespError(rest.decode())
+        return RespError(rest.decode("latin-1"))  # latin-1 keeps every byte as-is
     if kind == b":":
         return int(rest)
     if kind == b"$":
