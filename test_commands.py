@@ -1,0 +1,153 @@
+"""Unit tests that call commands directly with a fake clock, so time-based
+behaviour (expiry) is exact and the tests never sleep.
+
+Run:  python -m unittest -v
+"""
+import unittest
+
+import commands
+from store import Store
+
+
+class FakeClock:
+    def __init__(self, start=1_000_000.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def parts(args):
+    return [a.encode() if isinstance(a, str) else a for a in args]
+
+
+class CommandTest(unittest.TestCase):
+    def setUp(self):
+        self.clock = FakeClock()
+        self.store = Store(clock=self.clock)
+
+    def run_cmd(self, *args):
+        return commands.execute(self.store, parts(args))
+
+
+class ExpiryTest(CommandTest):
+    def test_set_ex_key_disappears_exactly_at_deadline(self):
+        self.run_cmd("SET", "k", "v", "EX", "10")
+        self.clock.advance(9.999)
+        self.assertEqual(self.run_cmd("GET", "k"), b"$1\r\nv\r\n")
+        self.clock.advance(0.001)  # now == deadline -> expired
+        self.assertEqual(self.run_cmd("GET", "k"), b"$-1\r\n")
+
+    def test_set_px(self):
+        self.run_cmd("SET", "k", "v", "PX", "250")
+        self.clock.advance(0.249)
+        self.assertEqual(self.run_cmd("EXISTS", "k"), b":1\r\n")
+        self.clock.advance(0.001)
+        self.assertEqual(self.run_cmd("EXISTS", "k"), b":0\r\n")
+
+    def test_option_names_are_case_insensitive(self):
+        self.assertEqual(self.run_cmd("set", "k", "v", "ex", "5"), b"+OK\r\n")
+        self.assertEqual(self.run_cmd("TTL", "k"), b":5\r\n")
+
+    def test_ttl_missing_and_no_expiry(self):
+        self.assertEqual(self.run_cmd("TTL", "nope"), b":-2\r\n")
+        self.run_cmd("SET", "k", "v")
+        self.assertEqual(self.run_cmd("TTL", "k"), b":-1\r\n")
+
+    def test_ttl_counts_down(self):
+        self.run_cmd("SET", "k", "v", "EX", "10")
+        self.assertEqual(self.run_cmd("TTL", "k"), b":10\r\n")
+        self.clock.advance(3.2)  # 6.8s left -> rounds to 7
+        self.assertEqual(self.run_cmd("TTL", "k"), b":7\r\n")
+
+    def test_ttl_of_expired_key_is_minus_two(self):
+        self.run_cmd("SET", "k", "v", "EX", "1")
+        self.clock.advance(1)
+        self.assertEqual(self.run_cmd("TTL", "k"), b":-2\r\n")
+
+    def test_set_clears_old_ttl(self):
+        self.run_cmd("SET", "k", "v", "EX", "10")
+        self.run_cmd("SET", "k", "v2")
+        self.assertEqual(self.run_cmd("TTL", "k"), b":-1\r\n")
+        self.clock.advance(100)
+        self.assertEqual(self.run_cmd("GET", "k"), b"$2\r\nv2\r\n")
+
+    def test_set_at_the_exact_moment_of_expiry_makes_a_fresh_key(self):
+        # The edge case from the plan: key expires at the same instant it is updated.
+        self.run_cmd("SET", "k", "old", "EX", "5")
+        self.clock.advance(5)
+        self.run_cmd("SET", "k", "new")           # no TTL on the new value
+        self.clock.advance(1000)
+        self.assertEqual(self.run_cmd("GET", "k"), b"$3\r\nnew\r\n")
+
+    def test_expire_sets_deadline(self):
+        self.run_cmd("SET", "k", "v")
+        self.assertEqual(self.run_cmd("EXPIRE", "k", "30"), b":1\r\n")
+        self.assertEqual(self.run_cmd("TTL", "k"), b":30\r\n")
+        self.clock.advance(30)
+        self.assertEqual(self.run_cmd("EXISTS", "k"), b":0\r\n")
+
+    def test_expire_on_missing_key(self):
+        self.assertEqual(self.run_cmd("EXPIRE", "nope", "30"), b":0\r\n")
+
+    def test_expire_zero_or_negative_deletes_key(self):
+        self.run_cmd("SET", "a", "v")
+        self.run_cmd("SET", "b", "v")
+        self.assertEqual(self.run_cmd("EXPIRE", "a", "0"), b":1\r\n")
+        self.assertEqual(self.run_cmd("EXPIRE", "b", "-5"), b":1\r\n")
+        self.assertEqual(self.run_cmd("EXISTS", "a", "b"), b":0\r\n")
+
+    def test_expire_rejects_non_integer(self):
+        self.run_cmd("SET", "k", "v")
+        self.assertTrue(self.run_cmd("EXPIRE", "k", "soon").startswith(b"-ERR value is not an integer"))
+        self.assertTrue(self.run_cmd("EXPIRE", "k", " 5").startswith(b"-ERR value is not an integer"))
+
+    def test_del_does_not_count_expired_key(self):
+        self.run_cmd("SET", "k", "v", "EX", "1")
+        self.clock.advance(1)
+        self.assertEqual(self.run_cmd("DEL", "k"), b":0\r\n")
+
+    def test_del_removes_expiry_too(self):
+        self.run_cmd("SET", "k", "v", "EX", "10")
+        self.run_cmd("DEL", "k")
+        self.assertNotIn(b"k", self.store.expires)
+
+    def test_bad_set_options(self):
+        self.assertTrue(self.run_cmd("SET", "k", "v", "EX", "0").startswith(b"-ERR invalid expire time"))
+        self.assertTrue(self.run_cmd("SET", "k", "v", "EX", "-1").startswith(b"-ERR invalid expire time"))
+        self.assertTrue(self.run_cmd("SET", "k", "v", "EX", "abc").startswith(b"-ERR value is not an integer"))
+        self.assertTrue(self.run_cmd("SET", "k", "v", "EX").startswith(b"-ERR syntax error"))
+        self.assertTrue(self.run_cmd("SET", "k", "v", "EX", "5", "PX", "5").startswith(b"-ERR syntax error"))
+        self.assertTrue(self.run_cmd("SET", "k", "v", "FOO").startswith(b"-ERR syntax error"))
+        self.assertEqual(self.run_cmd("EXISTS", "k"), b":0\r\n")  # failed SETs stored nothing
+
+
+class SweepTest(CommandTest):
+    def test_sweep_removes_expired_keys_only(self):
+        self.run_cmd("SET", "short1", "v", "EX", "1")
+        self.run_cmd("SET", "short2", "v", "EX", "1")
+        self.run_cmd("SET", "long", "v", "EX", "100")
+        self.run_cmd("SET", "forever", "v")
+        self.clock.advance(2)
+        removed = self.store.sweep()
+        self.assertEqual(removed, 2)
+        self.assertEqual(sorted(self.store.data), [b"forever", b"long"])
+        self.assertEqual(list(self.store.expires), [b"long"])
+
+    def test_sweep_keeps_going_when_most_keys_are_expired(self):
+        for i in range(200):
+            self.run_cmd("SET", "k%d" % i, "v", "EX", "1")
+        self.clock.advance(2)
+        self.store.sweep()
+        self.assertEqual(self.store.data, {})
+
+    def test_sweep_with_nothing_to_do(self):
+        self.run_cmd("SET", "k", "v")
+        self.assertEqual(self.store.sweep(), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
