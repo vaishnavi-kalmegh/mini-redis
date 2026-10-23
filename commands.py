@@ -112,6 +112,37 @@ def cmd_ttl(store, args):
     return resp.integer((ms + 500) // 1000)  # round to nearest second like Redis
 
 
+# ---- counters ----
+
+def _add_to_counter(store, key, delta):
+    current = store.get(key)
+    if current is None:
+        number = 0
+    elif not isinstance(current, bytes):
+        return WRONGTYPE
+    else:
+        number = parse_int(current)
+        if number is None:
+            return NOT_INT
+    number += delta
+    if not INT64_MIN <= number <= INT64_MAX:
+        return resp.error("ERR increment or decrement would overflow")
+    store.put(key, str(number).encode())  # put() keeps any existing TTL
+    return resp.integer(number)
+
+
+def cmd_incr(store, args):
+    if len(args) != 1:
+        return wrong_args("incr")
+    return _add_to_counter(store, args[0], 1)
+
+
+def cmd_decr(store, args):
+    if len(args) != 1:
+        return wrong_args("decr")
+    return _add_to_counter(store, args[0], -1)
+
+
 def cmd_command(store, args):
     # redis-cli asks "COMMAND DOCS" when it connects. An empty list keeps it happy.
     return resp.array([])
@@ -125,6 +156,8 @@ COMMANDS = {
     b"EXISTS": cmd_exists,
     b"EXPIRE": cmd_expire,
     b"TTL": cmd_ttl,
+    b"INCR": cmd_incr,
+    b"DECR": cmd_decr,
     b"COMMAND": cmd_command,
 }
 
