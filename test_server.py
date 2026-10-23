@@ -106,6 +106,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.ask("TTL", "t", expect_len=6), b":100\r\n")
         self.assertEqual(self.ask("TTL", "missing", expect_len=5), b":-2\r\n")
 
+    # ---- counters, lists, hashes over the wire ----
+
+    def test_incr_over_the_wire(self):
+        self.assertEqual(self.ask("INCR", "wire_counter", expect_len=4), b":1\r\n")
+        self.assertEqual(self.ask("DECR", "wire_counter", expect_len=4), b":0\r\n")
+
+    def test_list_over_the_wire(self):
+        self.assertEqual(self.ask("RPUSH", "wire_list", "a", "b", expect_len=4), b":2\r\n")
+        expected = b"*2\r\n$1\r\na\r\n$1\r\nb\r\n"
+        self.assertEqual(self.ask("LRANGE", "wire_list", "0", "-1", expect_len=len(expected)), expected)
+
+    def test_hash_over_the_wire(self):
+        self.assertEqual(self.ask("HSET", "wire_hash", "f", "v", expect_len=4), b":1\r\n")
+        self.assertEqual(self.ask("HGET", "wire_hash", "f", expect_len=7), b"$1\r\nv\r\n")
+
+    def test_wrongtype_over_the_wire(self):
+        self.ask("RPUSH", "wire_list2", "a", expect_len=4)
+        self.sock.sendall(cmd("GET", "wire_list2"))
+        self.assertEqual(self.read(11), b"-WRONGTYPE ")
+
     # ---- errors ----
 
     def test_unknown_command(self):

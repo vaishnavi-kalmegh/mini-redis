@@ -171,6 +171,145 @@ class CounterTest(CommandTest):
         self.assertTrue(self.run_cmd("DECR", "a", "b").startswith(b"-ERR wrong number of arguments"))
 
 
+def arr(*items):
+    """Expected RESP reply for a list of strings."""
+    out = b"*%d\r\n" % len(items)
+    for item in items:
+        out += b"$%d\r\n%s\r\n" % (len(item), item.encode())
+    return out
+
+
+class ListTest(CommandTest):
+    def test_rpush_keeps_order_and_returns_length(self):
+        self.assertEqual(self.run_cmd("RPUSH", "l", "a", "b", "c"), b":3\r\n")
+        self.assertEqual(self.run_cmd("LRANGE", "l", "0", "-1"), arr("a", "b", "c"))
+
+    def test_lpush_reverses_arguments(self):
+        self.assertEqual(self.run_cmd("LPUSH", "l", "a", "b", "c"), b":3\r\n")
+        self.assertEqual(self.run_cmd("LRANGE", "l", "0", "-1"), arr("c", "b", "a"))
+
+    def test_mixed_pushes(self):
+        self.run_cmd("RPUSH", "l", "b")
+        self.run_cmd("LPUSH", "l", "a")
+        self.run_cmd("RPUSH", "l", "c")
+        self.assertEqual(self.run_cmd("LRANGE", "l", "0", "-1"), arr("a", "b", "c"))
+
+    def test_lrange_ranges(self):
+        self.run_cmd("RPUSH", "l", "a", "b", "c", "d", "e")
+        self.assertEqual(self.run_cmd("LRANGE", "l", "1", "2"), arr("b", "c"))
+        self.assertEqual(self.run_cmd("LRANGE", "l", "-2", "-1"), arr("d", "e"))
+        self.assertEqual(self.run_cmd("LRANGE", "l", "0", "100"), arr("a", "b", "c", "d", "e"))
+        self.assertEqual(self.run_cmd("LRANGE", "l", "-100", "1"), arr("a", "b"))
+        self.assertEqual(self.run_cmd("LRANGE", "l", "3", "1"), arr())
+        self.assertEqual(self.run_cmd("LRANGE", "l", "10", "20"), arr())
+        self.assertEqual(self.run_cmd("LRANGE", "l", "0", "-100"), arr())
+
+    def test_lrange_missing_key_is_empty(self):
+        self.assertEqual(self.run_cmd("LRANGE", "nope", "0", "-1"), arr())
+
+    def test_lrange_non_integer_index(self):
+        self.run_cmd("RPUSH", "l", "a")
+        self.assertTrue(self.run_cmd("LRANGE", "l", "x", "1").startswith(b"-ERR value is not an integer"))
+
+    def test_list_values_can_be_binary(self):
+        self.run_cmd("RPUSH", "l", b"a\r\nb")
+        self.assertEqual(self.run_cmd("LRANGE", "l", "0", "-1"), b"*1\r\n$4\r\na\r\nb\r\n")
+
+    def test_list_can_expire_and_be_deleted(self):
+        self.run_cmd("RPUSH", "l", "a")
+        self.run_cmd("EXPIRE", "l", "5")
+        self.clock.advance(5)
+        self.assertEqual(self.run_cmd("EXISTS", "l"), b":0\r\n")
+        self.run_cmd("RPUSH", "l2", "a")
+        self.assertEqual(self.run_cmd("DEL", "l2"), b":1\r\n")
+
+    def test_pushing_onto_an_expired_list_starts_fresh(self):
+        self.run_cmd("RPUSH", "l", "old")
+        self.run_cmd("EXPIRE", "l", "1")
+        self.clock.advance(1)
+        self.assertEqual(self.run_cmd("RPUSH", "l", "new"), b":1\r\n")
+        self.assertEqual(self.run_cmd("TTL", "l"), b":-1\r\n")
+
+    def test_wrong_arg_counts(self):
+        self.assertTrue(self.run_cmd("LPUSH", "l").startswith(b"-ERR wrong number of arguments"))
+        self.assertTrue(self.run_cmd("LRANGE", "l", "0").startswith(b"-ERR wrong number of arguments"))
+
+
+class HashTest(CommandTest):
+    def test_hset_hget(self):
+        self.assertEqual(self.run_cmd("HSET", "h", "name", "Vi"), b":1\r\n")
+        self.assertEqual(self.run_cmd("HGET", "h", "name"), b"$2\r\nVi\r\n")
+
+    def test_hset_counts_only_new_fields(self):
+        self.assertEqual(self.run_cmd("HSET", "h", "a", "1", "b", "2"), b":2\r\n")
+        self.assertEqual(self.run_cmd("HSET", "h", "a", "9", "c", "3"), b":1\r\n")
+        self.assertEqual(self.run_cmd("HGET", "h", "a"), b"$1\r\n9\r\n")
+        self.assertEqual(self.run_cmd("HSET", "h", "a", "9"), b":0\r\n")
+
+    def test_hget_missing_field_or_key(self):
+        self.run_cmd("HSET", "h", "a", "1")
+        self.assertEqual(self.run_cmd("HGET", "h", "zzz"), b"$-1\r\n")
+        self.assertEqual(self.run_cmd("HGET", "nope", "a"), b"$-1\r\n")
+
+    def test_hset_needs_complete_pairs(self):
+        self.assertTrue(self.run_cmd("HSET", "h", "a").startswith(b"-ERR wrong number of arguments"))
+        self.assertTrue(self.run_cmd("HSET", "h", "a", "1", "b").startswith(b"-ERR wrong number of arguments"))
+        self.assertEqual(self.run_cmd("EXISTS", "h"), b":0\r\n")
+
+    def test_hash_can_expire(self):
+        self.run_cmd("HSET", "h", "a", "1")
+        self.run_cmd("EXPIRE", "h", "2")
+        self.clock.advance(2)
+        self.assertEqual(self.run_cmd("HGET", "h", "a"), b"$-1\r\n")
+
+    def test_hset_keeps_existing_ttl(self):
+        self.run_cmd("HSET", "h", "a", "1")
+        self.run_cmd("EXPIRE", "h", "10")
+        self.run_cmd("HSET", "h", "b", "2")
+        self.assertEqual(self.run_cmd("TTL", "h"), b":10\r\n")
+
+
+class WrongTypeTest(CommandTest):
+    def setUp(self):
+        super().setUp()
+        self.run_cmd("SET", "str", "v")
+        self.run_cmd("RPUSH", "list", "a")
+        self.run_cmd("HSET", "hash", "f", "v")
+
+    def assertWrongType(self, *args):
+        self.assertTrue(self.run_cmd(*args).startswith(b"-WRONGTYPE "), args)
+
+    def test_string_commands_on_other_types(self):
+        self.assertWrongType("GET", "list")
+        self.assertWrongType("GET", "hash")
+        self.assertWrongType("INCR", "list")
+        self.assertWrongType("DECR", "hash")
+
+    def test_list_commands_on_other_types(self):
+        self.assertWrongType("LPUSH", "str", "x")
+        self.assertWrongType("RPUSH", "hash", "x")
+        self.assertWrongType("LRANGE", "str", "0", "-1")
+        self.assertWrongType("LRANGE", "hash", "0", "-1")
+
+    def test_hash_commands_on_other_types(self):
+        self.assertWrongType("HSET", "str", "f", "v")
+        self.assertWrongType("HSET", "list", "f", "v")
+        self.assertWrongType("HGET", "str", "f")
+        self.assertWrongType("HGET", "list", "f")
+
+    def test_failed_command_leaves_data_alone(self):
+        self.run_cmd("LPUSH", "str", "x")
+        self.assertEqual(self.run_cmd("GET", "str"), b"$1\r\nv\r\n")
+
+    def test_set_overwrites_any_type(self):
+        self.run_cmd("SET", "list", "now a string")
+        self.assertEqual(self.run_cmd("GET", "list"), b"$12\r\nnow a string\r\n")
+
+    def test_del_and_exists_work_on_any_type(self):
+        self.assertEqual(self.run_cmd("EXISTS", "str", "list", "hash"), b":3\r\n")
+        self.assertEqual(self.run_cmd("DEL", "str", "list", "hash"), b":3\r\n")
+
+
 class SweepTest(CommandTest):
     def test_sweep_removes_expired_keys_only(self):
         self.run_cmd("SET", "short1", "v", "EX", "1")

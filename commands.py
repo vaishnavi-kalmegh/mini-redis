@@ -1,6 +1,8 @@
 """Command handlers. Each takes (store, args) where args excludes the command
 name, and returns an already-encoded RESP reply."""
 import re
+from collections import deque
+from itertools import islice
 
 import resp
 
@@ -143,6 +145,96 @@ def cmd_decr(store, args):
     return _add_to_counter(store, args[0], -1)
 
 
+# ---- lists (stored as a deque so pushing on either end is fast) ----
+
+def _get_typed(store, key, kind):
+    """Fetch a value that must be of type `kind`. Returns (value, error);
+    value is None if the key doesn't exist."""
+    value = store.get(key)
+    if value is not None and not isinstance(value, kind):
+        return None, WRONGTYPE
+    return value, None
+
+
+def _push(store, args, name, left):
+    if len(args) < 2:
+        return wrong_args(name)
+    items, err = _get_typed(store, args[0], deque)
+    if err:
+        return err
+    if items is None:
+        items = deque()
+        store.set(args[0], items)
+    for value in args[1:]:
+        if left:
+            items.appendleft(value)  # LPUSH a b c  ->  c b a
+        else:
+            items.append(value)
+    return resp.integer(len(items))
+
+
+def cmd_lpush(store, args):
+    return _push(store, args, "lpush", left=True)
+
+
+def cmd_rpush(store, args):
+    return _push(store, args, "rpush", left=False)
+
+
+def cmd_lrange(store, args):
+    """LRANGE key start stop  (both ends included, negative = from the end)"""
+    if len(args) != 3:
+        return wrong_args("lrange")
+    start, stop = parse_int(args[1]), parse_int(args[2])
+    if start is None or stop is None:
+        return NOT_INT
+    items, err = _get_typed(store, args[0], deque)
+    if err:
+        return err
+    if items is None:
+        return resp.array([])
+    n = len(items)
+    if start < 0:
+        start = max(n + start, 0)
+    if stop < 0:
+        stop += n
+    stop = min(stop, n - 1)
+    if start > stop:
+        return resp.array([])
+    return resp.array([resp.bulk_string(v) for v in islice(items, start, stop + 1)])
+
+
+# ---- hashes (a dict inside a key) ----
+
+def cmd_hset(store, args):
+    """HSET key field value [field value ...] -> number of NEW fields"""
+    if len(args) < 3 or len(args) % 2 == 0:
+        return wrong_args("hset")
+    fields, err = _get_typed(store, args[0], dict)
+    if err:
+        return err
+    if fields is None:
+        fields = {}
+        store.set(args[0], fields)
+    added = 0
+    for i in range(1, len(args), 2):
+        if args[i] not in fields:
+            added += 1
+        fields[args[i]] = args[i + 1]
+    return resp.integer(added)
+
+
+def cmd_hget(store, args):
+    if len(args) != 2:
+        return wrong_args("hget")
+    fields, err = _get_typed(store, args[0], dict)
+    if err:
+        return err
+    if fields is None:
+        return resp.bulk_string(None)
+    return resp.bulk_string(fields.get(args[1]))
+
+
 def cmd_command(store, args):
     # redis-cli asks "COMMAND DOCS" when it connects. An empty list keeps it happy.
     return resp.array([])
@@ -158,6 +250,11 @@ COMMANDS = {
     b"TTL": cmd_ttl,
     b"INCR": cmd_incr,
     b"DECR": cmd_decr,
+    b"LPUSH": cmd_lpush,
+    b"RPUSH": cmd_rpush,
+    b"LRANGE": cmd_lrange,
+    b"HSET": cmd_hset,
+    b"HGET": cmd_hget,
     b"COMMAND": cmd_command,
 }
 
