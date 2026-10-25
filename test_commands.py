@@ -7,17 +7,7 @@ import unittest
 
 import commands
 from store import Store
-
-
-class FakeClock:
-    def __init__(self, start=1_000_000.0):
-        self.now = start
-
-    def __call__(self):
-        return self.now
-
-    def advance(self, seconds):
-        self.now += seconds
+from testutil import FakeClock
 
 
 def parts(args):
@@ -114,6 +104,23 @@ class ExpiryTest(CommandTest):
         self.run_cmd("SET", "k", "v", "EX", "10")
         self.run_cmd("DEL", "k")
         self.assertNotIn(b"k", self.store.expires)
+
+    def test_pxat_sets_an_absolute_deadline(self):
+        at = self.store.now_ms() + 5000
+        self.assertEqual(self.run_cmd("SET", "k", "v", "PXAT", str(at)), b"+OK\r\n")
+        self.assertEqual(self.run_cmd("TTL", "k"), b":5\r\n")
+        self.clock.advance(5)
+        self.assertEqual(self.run_cmd("EXISTS", "k"), b":0\r\n")
+
+    def test_pexpireat(self):
+        self.run_cmd("SET", "k", "v")
+        self.assertEqual(self.run_cmd("PEXPIREAT", "k", str(self.store.now_ms() + 7000)), b":1\r\n")
+        self.assertEqual(self.run_cmd("TTL", "k"), b":7\r\n")
+        self.assertEqual(self.run_cmd("PEXPIREAT", "missing", "99999999999999"), b":0\r\n")
+        self.assertEqual(self.run_cmd("PEXPIREAT", "k", "1000"), b":1\r\n")  # in the past: deleted
+        self.assertEqual(self.run_cmd("EXISTS", "k"), b":0\r\n")
+        self.assertTrue(self.run_cmd("PEXPIREAT", "k", "abc").startswith(b"-ERR value is not an integer"))
+        self.assertTrue(self.run_cmd("PEXPIREAT", "k").startswith(b"-ERR wrong number of arguments"))
 
     def test_expiry_that_does_not_fit_in_64_bits_is_rejected(self):
         too_big = "invalid expire time in '%s' command"

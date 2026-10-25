@@ -55,7 +55,7 @@ def cmd_ping(store, args):
 
 
 def cmd_set(store, args):
-    """SET key value [EX seconds | PX milliseconds]"""
+    """SET key value [EX seconds | PX milliseconds | PXAT unix-milliseconds]"""
     if len(args) < 2:
         return wrong_args("set")
     key, value = args[0], args[1]
@@ -64,20 +64,29 @@ def cmd_set(store, args):
     i = 2
     while i < len(args):
         option = args[i].upper()
-        if option in (b"EX", b"PX") and deadline is None and i + 1 < len(args):
+        if option in (b"EX", b"PX", b"PXAT") and deadline is None and i + 1 < len(args):
             amount = parse_int(args[i + 1])
             if amount is None:
                 return NOT_INT
             if amount <= 0:
                 return invalid_expire("set")
-            deadline = deadline_ms(store, amount, 1000 if option == b"EX" else 1)
-            if deadline is None:
-                return invalid_expire("set")
+            if option == b"PXAT":
+                deadline = amount  # already an absolute time
+            else:
+                deadline = deadline_ms(store, amount, 1000 if option == b"EX" else 1)
+                if deadline is None:
+                    return invalid_expire("set")
             i += 2
         else:
             return SYNTAX
 
     store.set(key, value, deadline)
+    # Logged in absolute form, as ONE command, so a crash can't separate the
+    # value from its deadline.
+    if deadline is None:
+        store.emit(b"SET", key, value)
+    else:
+        store.emit(b"SET", key, value, b"PXAT", str(deadline).encode())
     return resp.simple_string("OK")
 
 
@@ -93,8 +102,14 @@ def cmd_get(store, args):
 def cmd_del(store, args):
     if not args:
         return wrong_args("del")
-    # Check each key first so an expired key counts as already gone.
-    return resp.integer(sum(1 for key in args if store.get(key) is not None and store.delete(key)))
+    removed = []
+    for key in args:
+        # get() first, so an expired key counts as already gone
+        if store.get(key) is not None and store.delete(key):
+            removed.append(key)
+    if removed:
+        store.emit(b"DEL", *removed)
+    return resp.integer(len(removed))
 
 
 def cmd_exists(store, args):
@@ -119,8 +134,30 @@ def cmd_expire(store, args):
         return resp.integer(0)
     if seconds <= 0:
         store.delete(args[0])  # a deadline in the past deletes the key
+        store.emit(b"DEL", args[0])
         return resp.integer(1)
     store.set_expiry(args[0], deadline)
+    store.emit(b"PEXPIREAT", args[0], str(deadline).encode())  # logged as an absolute time
+    return resp.integer(1)
+
+
+def cmd_pexpireat(store, args):
+    """PEXPIREAT key unix-milliseconds  (an absolute deadline; this is the form
+    EXPIRE is written to the log in)"""
+    if len(args) != 2:
+        return wrong_args("pexpireat")
+    when = parse_int(args[1])
+    if when is None:
+        return NOT_INT
+    key = args[0]
+    if not store.exists(key):
+        return resp.integer(0)
+    if when <= store.now_ms() and not store.loading:
+        store.delete(key)  # a deadline that has already passed deletes the key
+        store.emit(b"DEL", key)
+        return resp.integer(1)
+    store.set_expiry(key, when)
+    store.emit(b"PEXPIREAT", key, str(when).encode())
     return resp.integer(1)
 
 
@@ -150,6 +187,7 @@ def _add_to_counter(store, key, delta):
     if not INT64_MIN <= number <= INT64_MAX:
         return resp.error("ERR increment or decrement would overflow")
     store.put(key, str(number).encode())  # put() keeps any existing TTL
+    store.emit(b"INCR" if delta > 0 else b"DECR", key)
     return resp.integer(number)
 
 
@@ -190,6 +228,7 @@ def _push(store, args, name, left):
             items.appendleft(value)  # LPUSH a b c  ->  c b a
         else:
             items.append(value)
+    store.emit(b"LPUSH" if left else b"RPUSH", *args)
     return resp.integer(len(items))
 
 
@@ -241,6 +280,7 @@ def cmd_hset(store, args):
         if args[i] not in fields:
             added += 1
         fields[args[i]] = args[i + 1]
+    store.emit(b"HSET", *args)
     return resp.integer(added)
 
 
@@ -267,6 +307,7 @@ COMMANDS = {
     b"DEL": cmd_del,
     b"EXISTS": cmd_exists,
     b"EXPIRE": cmd_expire,
+    b"PEXPIREAT": cmd_pexpireat,
     b"TTL": cmd_ttl,
     b"INCR": cmd_incr,
     b"DECR": cmd_decr,

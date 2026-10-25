@@ -25,15 +25,40 @@ class Store:
         self.expires = {}   # key -> deadline in unix milliseconds
         self.clock = clock  # injectable so tests can control time
 
+        # Support for the append-only log (aof.py):
+        self.record_writes = False  # True when a log is attached
+        self.loading = False        # True while the log is being replayed at startup
+        self.pending = []           # changes made but not yet appended to the log
+
     def now_ms(self):
         return int(self.clock() * 1000)
+
+    # ---- the change log ----
+
+    def emit(self, *args):
+        """Record a command that reproduces a change we just made. Commands call
+        this with an exact, replayable form (absolute deadlines, never "10 seconds
+        from now"). Does nothing unless a log is attached, or while replaying it."""
+        if self.record_writes and not self.loading:
+            self.pending.append(args)
+
+    def take_pending(self):
+        pending, self.pending = self.pending, []
+        return pending
 
     # ---- expiry ----
 
     def _expire_if_needed(self, key):
+        if self.loading:
+            # While replaying the log nothing expires: the log describes the past,
+            # and an expired key might still be changed by a later logged command.
+            return False
         deadline = self.expires.get(key)
         if deadline is not None and self.now_ms() >= deadline:
             self.delete(key)
+            # Log the deletion. Otherwise replay would bring the key back, and a
+            # later command on a re-created key would act on the wrong old value.
+            self.emit(b"DEL", key)
             return True
         return False
 

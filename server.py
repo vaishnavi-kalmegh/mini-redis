@@ -1,22 +1,44 @@
 """Mini Redis: a small Redis-compatible server.
 
 Run:   python server.py --port 6380
+       python server.py --port 6380 --aof-file mini.aof     (keep data across restarts)
 Try:   redis-cli -p 6380 PING
 """
 import argparse
 import asyncio
+import os
+import signal
 import sys
 import traceback
 
+import aof as aof_module
 import commands
 import resp
 from store import Store
 
 store = Store()
+log = None  # the AppendOnlyLog, when --aof-file is given
 
 # If a client has sent this many bytes of one unfinished command, give up on it.
 # (Real Redis uses 1 GB too.) Set by --max-query-buffer; tests use a tiny value.
 max_query_buffer = 1024 ** 3
+
+
+def log_writes():
+    """Append the changes the last command made to the log. Called BEFORE the
+    client is sent its reply, so no write is ever acknowledged unless it has
+    been handed to the log."""
+    if not store.pending:
+        return
+    try:
+        log.append(store.take_pending())
+    except OSError as e:
+        # The data in memory now has changes the log doesn't. Carrying on would
+        # mean promising durability we can't give, so stop (Redis does the same
+        # when "appendfsync always" fails).
+        print("FATAL: cannot write to the append-only log (%s). Stopping." % e,
+              file=sys.stderr, flush=True)
+        os._exit(1)
 
 
 async def handle_client(reader, writer):
@@ -45,10 +67,12 @@ async def handle_client(reader, writer):
                 del buf[:consumed]
                 if args:  # ignore empty lines
                     try:
-                        writer.write(commands.execute(store, args))
+                        reply = commands.execute(store, args)
                     except Exception:
                         traceback.print_exc(file=sys.stderr)
-                        writer.write(resp.error("ERR internal error"))
+                        reply = resp.error("ERR internal error")
+                    log_writes()
+                    writer.write(reply)
 
             if len(buf) > max_query_buffer:
                 writer.write(resp.error("ERR Protocol error: query buffer limit exceeded"))
@@ -73,17 +97,44 @@ async def sweeper():
     while True:
         await asyncio.sleep(1)
         store.sweep()
+        log_writes()  # expiries are logged as DEL
 
 
-async def main(host, port):
+async def main(host, port, aof_path=None, fsync_policy="everysec"):
+    global log
+    if aof_path:
+        replayed, ignored = aof_module.load(aof_path, store)  # may raise AOFError
+        print("Loaded %d commands from %s" % (replayed, aof_path), flush=True)
+        if ignored:
+            print("WARNING: ignored %d bytes of an incomplete command at the end of %s "
+                  "(the server was probably stopped in the middle of a write); removed them."
+                  % (ignored, aof_path), file=sys.stderr, flush=True)
+        log = aof_module.AppendOnlyLog(aof_path, fsync_policy)
+        store.record_writes = True
+
     server = await asyncio.start_server(handle_client, host, port)
-    sweep_task = asyncio.create_task(sweeper())  # keep a reference so it isn't garbage collected
+    tasks = [asyncio.create_task(sweeper())]  # keep references so they aren't garbage collected
+    if log and fsync_policy == "everysec":
+        tasks.append(asyncio.create_task(log.sync_forever()))
+
+    # Stop cleanly on Ctrl+C / SIGTERM so the log gets a final fsync.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            pass  # Windows: Ctrl+C still stops the program, just without the final fsync
+
     print("Mini Redis listening on %s:%d" % (host, port), flush=True)
     try:
-        async with server:
-            await server.serve_forever()
+        await stop.wait()
     finally:
-        sweep_task.cancel()
+        server.close()
+        for task in tasks:
+            task.cancel()
+        if log:
+            log.close()
 
 
 if __name__ == "__main__":
@@ -92,9 +143,17 @@ if __name__ == "__main__":
     p.add_argument("--port", type=int, default=6380)
     p.add_argument("--max-query-buffer", type=int, default=max_query_buffer,
                    help="bytes of one unfinished command before the client is dropped")
+    p.add_argument("--aof-file", help="append-only log file; enables saving data to disk")
+    p.add_argument("--appendfsync", choices=["always", "everysec", "no"], default="everysec",
+                   help="how often to fsync the log (default: everysec)")
     a = p.parse_args()
     max_query_buffer = a.max_query_buffer
     try:
-        asyncio.run(main(a.host, a.port))
+        asyncio.run(main(a.host, a.port, a.aof_file, a.appendfsync))
+    except aof_module.AOFError as e:
+        print("FATAL: the append-only log %s is damaged and the server will not start: %s\n"
+              "Nothing was changed. Fix or move the file, then start again." % (a.aof_file, e),
+              file=sys.stderr)
+        sys.exit(1)
     except KeyboardInterrupt:
         pass

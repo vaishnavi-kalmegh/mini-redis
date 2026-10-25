@@ -23,12 +23,27 @@ def free_port():
     return port
 
 
-def start_server(*extra_args):
-    """Start server.py as a separate process. Returns (process, port)."""
+class FakeClock:
+    """A clock tests can move by hand, so time-based behaviour is exact."""
+
+    def __init__(self, start=1_000_000.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def start_server(*extra_args, stderr=None):
+    """Start server.py as a separate process. Returns (process, port).
+    Pass stderr=subprocess.PIPE to capture the server's warnings."""
     port = free_port()
     proc = subprocess.Popen(
         [sys.executable, "server.py", "--port", str(port), *extra_args],
         stdout=subprocess.DEVNULL,
+        stderr=stderr,
     )
     for _ in range(50):
         try:
