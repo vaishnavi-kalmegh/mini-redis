@@ -109,9 +109,8 @@ properties, each covered by a test in `test_concurrency.py`:
 The parser has its own tests (`test_resp.py`), including one that feeds every
 possible partial prefix of a command and checks it reports "not complete yet".
 
-I also pointed the real `redis-benchmark` tool at the server with 50 and 200
-clients (including pipelining) as a sanity check. It completed without errors.
-Proper speed measurements against real Redis come in Stage 5.
+The real `redis-benchmark` tool also runs against it cleanly with 50 and 200 clients,
+with and without pipelining. Speed is covered in [Benchmarks](#benchmarks).
 
 **Trade-off:** because one thread runs every command, one slow command delays all
 clients. Real Redis has the same property, which is why its docs warn against
@@ -166,6 +165,48 @@ A property test also runs thousands of random commands (with time moving forward
 expiry, wrong-type errors, and restarts at random moments) and checks that the data
 read back from the log is exactly what was in memory.
 
+## Benchmarks
+
+Measured with the real `redis-benchmark` tool against real Redis 7.0.15 on the same
+machine (2 cores, shared cloud VM), 50 clients, median of 3 runs, each server on its
+own CPU core. Requests per second, no persistence:
+
+![Mini Redis speed as a percentage of real Redis](docs/benchmark.png)
+
+| Command | Real Redis | Mini Redis | Mini as % of real |
+|---|---:|---:|---:|
+| **One command at a time per client** | | | |
+| PING | 96,500 | 48,400 | 50% |
+| SET | 112,900 | 31,300 | 28% |
+| GET | 102,500 | 32,400 | 32% |
+| LPUSH | 94,000 | 33,000 | 35% |
+| LRANGE 0 99 | 71,300 | 14,600 | 21% |
+| **16 commands sent together (pipelined)** | | | |
+| SET | 754,700 | 152,000 | 20% |
+| GET | 854,700 | 160,300 | 19% |
+| LPUSH | 1,030,900 | 161,400 | 16% |
+| LRANGE 0 99 | 167,600 | 31,700 | 19% |
+
+**Mini Redis runs at roughly 15-50% of real Redis's speed.** That is the expected
+price of Python against C, and the gap is much larger than the noise on this machine
+(run-to-run spread was often 10-30%). All commands, the append-only log setup, and
+latencies are in [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+**Profiling, then fixing.** Under `cProfile`, Mini Redis made one `socket.send` per
+reply even when 16 commands arrived together; that was about 30% of its time, and
+only about 20% went to running the commands. Sending all of a batch's replies in one
+write (and logging a batch in one write) made pipelined workloads **3-4 times
+faster**. It did nothing measurable for one-command-at-a-time traffic, which is what
+the profile predicted. The before and after numbers, the profile, and why real Redis
+is still ahead are in [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+**Limits of this measurement:** one noisy 2-core VM, localhost only, and
+`redis-benchmark` may limit real Redis's pipelined numbers, which would make the true
+gap larger. Only the ratios would roughly carry over to another machine.
+
+To run it yourself: `python bench.py` (about 5 minutes; needs `redis-server` and
+`redis-benchmark`). A scripted demo for recording is in `demo.sh`.
+
 ## Not built yet
 
 - Log rewriting: the log only ever grows. Real Redis periodically rewrites it into
@@ -178,7 +219,9 @@ read back from the log is exactly what was in memory.
   treated as damaged and refused, not repaired
 - The sweep builds a list of all keys with deadlines each time, which is fine here
   but would be too slow for millions of keys
-- Speed benchmarks against real Redis
+- Speed work beyond the batching fix: cheaper parsing, skipping asyncio's stream
+  layer, trying `uvloop` (the ideas, in order, are in [docs/BENCHMARK.md](docs/BENCHMARK.md))
+- A demo GIF (`demo.sh` is ready to record)
 
 ## Roadmap
 
@@ -186,4 +229,4 @@ read back from the log is exactly what was in memory.
 2. Counters, expiry, lists, hashes (done)
 3. Many clients at once (done)
 4. Persistence with an append-only log (done)
-5. Benchmark against real Redis, explain the numbers, write up results
+5. Benchmark against real Redis, profile, fix the biggest cost, write up results (done)
