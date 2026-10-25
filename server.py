@@ -53,26 +53,41 @@ async def handle_client(reader, writer):
                 break  # client disconnected
             buf.extend(data)
 
-            # Parse as many complete commands as the buffer holds.
+            # Run every complete command the buffer holds, collecting the replies.
+            # Doing the writes once per batch, not once per command, matters a lot:
+            # a socket write is a system call, and profiling showed that making one
+            # per command was about a third of all the server's time when a client
+            # pipelines (sends many commands without waiting for replies).
+            replies = []
+            protocol_error = None
             while True:
                 try:
                     parsed = resp.parse_command(buf)
                 except resp.ProtocolError as e:
-                    writer.write(resp.error("ERR Protocol error: %s" % e))
-                    await writer.drain()
-                    return  # real Redis also closes the connection here
+                    protocol_error = e
+                    break
                 if parsed is None:
                     break  # incomplete: wait for more data
                 args, consumed = parsed
                 del buf[:consumed]
                 if args:  # ignore empty lines
                     try:
-                        reply = commands.execute(store, args)
+                        replies.append(commands.execute(store, args))
                     except Exception:
                         traceback.print_exc(file=sys.stderr)
-                        reply = resp.error("ERR internal error")
-                    log_writes()
-                    writer.write(reply)
+                        replies.append(resp.error("ERR internal error"))
+
+            # The batch's changes go to the log BEFORE any reply is sent, so a
+            # write is still never acknowledged unless it has been logged.
+            log_writes()
+            if protocol_error is not None:
+                # Replies to the commands before the bad data still go out first.
+                replies.append(resp.error("ERR Protocol error: %s" % protocol_error))
+            if replies:
+                writer.write(b"".join(replies))
+            if protocol_error is not None:
+                await writer.drain()
+                return  # real Redis also closes the connection here
 
             if len(buf) > max_query_buffer:
                 writer.write(resp.error("ERR Protocol error: query buffer limit exceeded"))

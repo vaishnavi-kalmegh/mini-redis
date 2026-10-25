@@ -132,6 +132,19 @@ class ServerTest(unittest.TestCase):
         self.sock.sendall(b"PING\r\n")
         self.assertEqual(self.read(7), b"+PONG\r\n")
 
+    def test_replies_before_a_protocol_error_still_arrive_first(self):
+        # Replies are sent in batches; the good commands' replies must not be lost
+        # or reordered when bad data follows them in the same packet.
+        self.sock.sendall(cmd("SET", "pe", "1") + cmd("GET", "pe") + b"*1\r\nXXX\r\n")
+        data = b""
+        while True:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break  # the server closes the connection after a protocol error
+            data += chunk
+        self.assertTrue(data.startswith(b"+OK\r\n$1\r\n1\r\n-ERR Protocol error"), data)
+        self.assertTrue(data.endswith(b"\r\n"))
+
     def test_garbage_closes_connection_with_error(self):
         self.sock.sendall(b"*1\r\nXXX\r\n")
         self.assertTrue(self.read(5).startswith(b"-ERR "))
