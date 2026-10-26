@@ -3,6 +3,13 @@
 A small Redis-compatible server written in Python, built to learn how Redis works.
 Real tools such as `redis-cli` can talk to it because it speaks the RESP protocol.
 
+![Demo: strings, expiry, counters, lists, hashes, and data surviving kill -9](docs/demo.gif)
+
+The demo above is real output, not a mock-up: `python make_demo_gif.py` starts the
+server, runs the real `redis-cli` commands (including a `kill -9` and a restart),
+captures what they print, and draws it as an animated terminal. `demo.sh` is the
+same demo as a plain script, if you would rather record your own terminal.
+
 ## Run it
 
 ```
@@ -205,7 +212,7 @@ is still ahead are in [docs/BENCHMARK.md](docs/BENCHMARK.md).
 gap larger. Only the ratios would roughly carry over to another machine.
 
 To run it yourself: `python bench.py` (about 5 minutes; needs `redis-server` and
-`redis-benchmark`). A scripted demo for recording is in `demo.sh`.
+`redis-benchmark`).
 
 ## Not built yet
 
@@ -221,7 +228,6 @@ To run it yourself: `python bench.py` (about 5 minutes; needs `redis-server` and
   but would be too slow for millions of keys
 - Speed work beyond the batching fix: cheaper parsing, skipping asyncio's stream
   layer, trying `uvloop` (the ideas, in order, are in [docs/BENCHMARK.md](docs/BENCHMARK.md))
-- A demo GIF (`demo.sh` is ready to record)
 
 ## Roadmap
 
