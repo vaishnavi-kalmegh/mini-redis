@@ -31,7 +31,7 @@ start; pause 1
 
 say "Strings"
 cli PING
-cli SET name Vi
+cli SET name Vaishnavi
 cli GET name
 
 say "Keys that expire"
@@ -45,10 +45,10 @@ cli INCR visits
 say "Lists and hashes"
 cli RPUSH queue first second third
 cli LRANGE queue 0 -1
-cli HSET user:1 name Vi city Nagpur
+cli HSET user:1 name Vaishnavi city Pune
 cli HGET user:1 city
 
-say "Using the wrong type gives the same error real Redis gives"
+say "Wrong type (an error on purpose): queue is a list, so GET is refused. Real Redis prints the same error"
 cli GET queue
 
 say "Now kill the server with kill -9, no clean shutdown..."

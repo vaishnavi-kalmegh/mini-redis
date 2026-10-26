@@ -79,7 +79,7 @@ def capture():
         steps.append(("cmd", "python server.py --port 6380 --aof-file demo.aof &", out))
         blank()
         comment("2. Strings: SET stores a value, GET reads it back")
-        cli("PING"); cli("SET", "name", "Vi"); cli("GET", "name")
+        cli("PING"); cli("SET", "name", "Vaishnavi"); cli("GET", "name")
         blank()
         comment("3. Keys can expire: EX 30 means delete after 30 seconds, TTL shows what is left")
         cli("SET", "session", "abc123", "EX", "30"); cli("TTL", "session")
@@ -92,10 +92,11 @@ def capture():
         cli("RPUSH", "queue", "first", "second", "third"); cli("LRANGE", "queue", "0", "-1")
         blank()
         comment("6. Hashes: a small dictionary stored under one key")
-        cli("HSET", "user:1", "name", "Vi", "city", "Nagpur"); cli("HGET", "user:1", "city")
+        cli("HSET", "user:1", "name", "Vaishnavi", "city", "Pune"); cli("HGET", "user:1", "city")
         steps.append(("clear",))
 
-        comment("7. Wrong type: 'queue' is a list, so GET is refused (same error as real Redis)")
+        comment("7. Wrong type (an error on purpose): 'queue' is a list, so GET is refused")
+        comment("    Real Redis prints exactly the same error.")
         cli("GET", "queue")
         blank()
         comment("8. Crash test: kill -9 gives the server no chance to save anything")
@@ -109,7 +110,7 @@ def capture():
         steps.append(("clear",))
 
         comment("10. The log is just the commands, in the format clients send (RESP).")
-        comment("    This is the SET name Vi from step 2. *3 = three parts follow,")
+        comment("    This is the SET name Vaishnavi from step 2. *3 = three parts follow,")
         comment("    $3 = the next part is 3 bytes long.")
         shell = "head -n 7 demo.aof | tr -d '\\r'"
         r = subprocess.run(shell, shell=True, cwd=workdir, capture_output=True, text=True)
