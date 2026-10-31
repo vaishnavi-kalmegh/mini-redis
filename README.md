@@ -17,6 +17,15 @@ python server.py --port 6380
 redis-cli -p 6380 PING        # -> PONG
 ```
 
+On Ubuntu or WSL, install the Redis command-line client (you do not need to run
+a separate Redis server):
+
+```bash
+sudo apt update
+sudo apt install redis-tools
+redis-cli --version
+```
+
 To keep your data across restarts, give it a log file:
 
 ```
